@@ -1,0 +1,5 @@
+{
+  "name": "Zen Vimeo Player",
+  "description": "A minimalist, full-screen mobile Vimeo player designed for immediate playback with zero distractions.",
+  "requestFramePermissions": []
+}
