@@ -6,19 +6,16 @@ export const VIDEO_CONFIG = {
 
 /**
  * Vimeo Player Embed Options
- * - autoplay=1: Attempt to start immediately
- * - muted=1: Required for autoplay on most mobile browsers
+ * - autoplay=0: We handle start manually to ensure audio context is ready
+ * - muted=0: We want audio
  * - controls=0: Hide the player chrome (interface)
  * - playsinline=1: Prevent iOS from forcing native full screen player
- * - title=0: Hide video title
- * - byline=0: Hide author
- * - portrait=0: Hide author portrait
  * - dnt=1: Do Not Track
- * - loop=1: Loop the video (often desired for interface-less displays, customizable)
+ * - loop=0: Stop at end to show start screen
  */
 export const VIMEO_PARAMS = {
-  autoplay: '1',
-  muted: '1', // Crucial for immediate playback on mobile
+  autoplay: '0',
+  muted: '0',
   controls: '0',
   playsinline: '1',
   title: '0',
@@ -27,5 +24,5 @@ export const VIMEO_PARAMS = {
   badge: '0',
   autopause: '0',
   dnt: '1',
-  loop: '1' 
+  loop: '0' 
 };

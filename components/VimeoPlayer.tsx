@@ -2,338 +2,437 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { VimeoPlayerProps, VimeoEmbedParams } from '../types';
 import { VIMEO_PARAMS, VIDEO_CONFIG } from '../constants';
 
-const VimeoPlayer: React.FC<VimeoPlayerProps> = ({ videoId, className = '' }) => {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+const UniversalPlayer: React.FC<VimeoPlayerProps> = ({ videoId, provider, className = '' }) => {
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const embedContainerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
-
+  const checkYTInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  
   // Player State
+  // Default to true so controls (play button) are available immediately if autoplay fails
+  const [hasStarted, setHasStarted] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(true);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
   const [showControls, setShowControls] = useState(false);
-  const [videoTitle, setVideoTitle] = useState(VIDEO_CONFIG.title); // Initialize with default, update dynamically
+  const [videoTitle, setVideoTitle] = useState(VIDEO_CONFIG.title);
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+  
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [videoAspectRatio, setVideoAspectRatio] = useState(16 / 9); // Default to 16:9
+  
+  // Initialize with 16:9 aspect ratio (standard) to prevent "black bar" locking on mobile load.
+  const [videoAspectRatio, setVideoAspectRatio] = useState(16 / 9);
 
-  // Sizing State for "Cover" effect
-  const [iframeStyle, setIframeStyle] = useState<React.CSSProperties>({
-    width: '100%',
-    height: '100%',
-    opacity: 0, // Start invisible to avoid letterbox flash
-    backgroundColor: '#000000', // Ensure black background
-    transition: 'opacity 0.5s ease-in',
+  const [videoDimensions, setVideoDimensions] = useState({ 
+    width: typeof window !== 'undefined' ? window.innerWidth : 1920, 
+    height: typeof window !== 'undefined' ? window.innerHeight : 1080 
   });
 
-  // Calculate dimensions to make iframe cover the screen (remove black/white bars)
-  const handleResize = useCallback(() => {
-    // If container not ready yet, use window dims directly
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const windowAspect = vw / vh;
-
+  // --- 1. Sizing Logic (Strict Cover / Zen Mode) ---
+  const calculateDimensions = useCallback((containerWidth: number, containerHeight: number, aspect: number) => {
+    const containerAspect = containerWidth / containerHeight;
     let width, height;
 
-    if (windowAspect > videoAspectRatio) {
-      // Window is wider than video -> Fit width, crop top/bottom
-      width = vw;
-      height = vw / videoAspectRatio;
+    if (containerAspect > aspect) {
+      // Container is wider than video -> Match Width (Cropping Top/Bottom)
+      width = containerWidth;
+      height = containerWidth / aspect;
     } else {
-      // Window is taller than video -> Fit height, crop left/right
-      height = vh;
-      width = vh * videoAspectRatio;
+      // Container is taller than video -> Match Height (Cropping Left/Right)
+      height = containerHeight;
+      width = containerHeight * aspect;
     }
 
-    setIframeStyle(prev => ({
-      ...prev,
-      width: `${width}px`,
-      height: `${height}px`,
-      position: 'absolute',
-      top: '50%',
-      left: '50%',
-      // We scale by 1.01 to ensure a slight bleed over edges, preventing any single-pixel whitespace lines
-      transform: 'translate(-50%, -50%) scale(1.01)', 
-      opacity: 1, // Fade in once calculated
-      backgroundColor: '#000000',
-    }));
-  }, [videoAspectRatio]);
-
-  // Run resize immediately on mount and when aspect ratio changes
-  useEffect(() => {
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    // Listen to visualViewport resize if available (handles mobile browser bars showing/hiding)
-    if (window.visualViewport) {
-        window.visualViewport.addEventListener('resize', handleResize);
-    }
-    
-    return () => {
-        window.removeEventListener('resize', handleResize);
-        if (window.visualViewport) {
-            window.visualViewport.removeEventListener('resize', handleResize);
-        }
-    };
-  }, [handleResize]);
-
-  // Initialize Player
-  useEffect(() => {
-    if (!iframeRef.current || !window.Vimeo) return;
-
-    const player = new window.Vimeo.Player(iframeRef.current);
-    playerRef.current = player;
-
-    player.ready().then(() => {
-      // fetch actual video dimensions to ensure perfect cover
-      Promise.all([player.getVideoWidth(), player.getVideoHeight()])
-        .then(([w, h]) => {
-          if (w && h) {
-            setVideoAspectRatio(w / h);
-          }
-        })
-        .catch(console.error);
-        
-      // Fetch dynamic title
-      player.getVideoTitle().then((title: string) => {
-          if (title) setVideoTitle(title);
-      }).catch(() => {});
-
-      // Attempt initial unmute (often blocked by browser, but worth trying)
-      player.setMuted(false).then(() => {
-        setIsMuted(false);
-        setVolume(1);
-      }).catch(() => {
-        // If blocked, we stay muted until interaction
-        console.log('Autoplay with sound blocked, waiting for interaction');
-      });
-      
-      player.getDuration().then((d: number) => setDuration(d));
-      
-      // Force play
-      player.play().catch(console.error);
-    });
-
-    player.on('play', () => setIsPlaying(true));
-    player.on('pause', () => setIsPlaying(false));
-    player.on('timeupdate', (data: any) => setProgress(data.seconds));
-    player.on('volumechange', (data: any) => {
-        setVolume(data.volume);
-        setIsMuted(data.volume === 0);
-    });
-    
-    // Ensure volume is up internally
-    player.setVolume(1).catch(() => {});
-
-    return () => {
-      player.unload();
+    // OVERSCAN: Add 2% buffer to ensure edge-to-edge coverage even with rounding errors
+    return {
+        width: Math.ceil(width * 1.02),
+        height: Math.ceil(height * 1.02)
     };
   }, []);
 
-  // Controls Visibility Logic
-  const showControlsTemporarily = () => {
+  const handleResize = useCallback(() => {
+    if (!wrapperRef.current) return;
+    const { clientWidth, clientHeight } = wrapperRef.current;
+    
+    // Fallback to window if wrapper is 0 (hidden or unmounted)
+    const w = clientWidth || window.innerWidth;
+    const h = clientHeight || window.innerHeight;
+    
+    setVideoDimensions(calculateDimensions(w, h, videoAspectRatio));
+  }, [videoAspectRatio, calculateDimensions]);
+
+  // Use ResizeObserver for robust layout tracking
+  useEffect(() => {
+    if (!wrapperRef.current) return;
+    
+    const resizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+            const { width, height } = entry.contentRect;
+            setVideoDimensions(calculateDimensions(width, height, videoAspectRatio));
+        }
+    });
+
+    resizeObserver.observe(wrapperRef.current);
+    
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleResize);
+
+    return () => {
+        resizeObserver.disconnect();
+        window.removeEventListener('resize', handleResize);
+        window.removeEventListener('orientationchange', handleResize);
+    };
+  }, [handleResize, videoAspectRatio, calculateDimensions]);
+
+  // --- 2. Data Fetching ---
+  useEffect(() => {
+    const fetchInfo = async () => {
+      setVideoTitle(''); 
+      setThumbnailUrl(null);
+
+      if (provider === 'vimeo') {
+        try {
+          const response = await fetch(`https://vimeo.com/api/oembed.json?url=https://vimeo.com/${videoId}`);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.title) setVideoTitle(data.title);
+            
+            // Extract real aspect ratio if available
+            if (data.width && data.height) {
+                setVideoAspectRatio(data.width / data.height);
+            }
+
+            const thumb = data.thumbnail_url_with_play_button || data.thumbnail_url;
+            setThumbnailUrl(thumb ? thumb.replace(/_\d+\.jpg/, '.jpg') : null);
+          }
+        } catch (e) { console.error(e); }
+      } else if (provider === 'youtube') {
+        try {
+            const response = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.title) setVideoTitle(data.title);
+                if (data.width && data.height) {
+                    setVideoAspectRatio(data.width / data.height);
+                }
+                const maxResThumb = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+                setThumbnailUrl(maxResThumb);
+            }
+        } catch(e) { console.error(e); }
+      }
+    };
+    fetchInfo();
+  }, [videoId, provider]);
+
+
+  // --- 3. Player Initialization ---
+  useEffect(() => {
+    if (!embedContainerRef.current) return;
+
+    // Reset State
+    setHasStarted(true); // Always true, we skip the preview screen
+    setIsPlaying(false);
+    setProgress(0);
+    
+    let vimeoPlayer: any = null;
+    let ytPlayer: any = null;
+    let syncInterval: ReturnType<typeof setInterval>;
+
+    const setupVimeo = () => {
+        if (!window.Vimeo) return;
+        embedContainerRef.current!.innerHTML = '';
+        const videoDiv = document.createElement('div');
+        videoDiv.style.width = '100%';
+        videoDiv.style.height = '100%'; 
+        embedContainerRef.current!.appendChild(videoDiv);
+
+        const params: VimeoEmbedParams = {
+            ...VIMEO_PARAMS,
+            id: videoId,
+            player_id: '0',
+            app_id: VIDEO_CONFIG.appId,
+            controls: '0',
+            background: '0', 
+            autoplay: '0', // Manual start in ready()
+            muted: '0',
+            playsinline: '1',
+            title: '0',
+            byline: '0',
+            portrait: '0'
+        };
+
+        vimeoPlayer = new window.Vimeo.Player(videoDiv, params);
+        playerRef.current = vimeoPlayer;
+
+        vimeoPlayer.ready().then(() => {
+            Promise.all([vimeoPlayer.getVideoWidth(), vimeoPlayer.getVideoHeight()])
+                .then(([w, h]) => { 
+                    if (w && h) setVideoAspectRatio(w / h);
+                }).catch(() => {});
+            vimeoPlayer.getDuration().then((d: number) => setDuration(d));
+
+            // AUTO START ATTEMPT
+            vimeoPlayer.setVolume(1).catch(() => {});
+            vimeoPlayer.setMuted(false).catch(() => {}); 
+            vimeoPlayer.play().catch((e: any) => {
+                console.warn("Autoplay blocked - user interaction required", e);
+                // isPlaying remains false, triggering the UI play button to show
+            });
+        });
+
+        vimeoPlayer.on('play', () => setIsPlaying(true));
+        vimeoPlayer.on('pause', () => setIsPlaying(false));
+        vimeoPlayer.on('timeupdate', (data: any) => setProgress(data.seconds));
+        vimeoPlayer.on('ended', () => {
+            setIsPlaying(false);
+            setProgress(0);
+            vimeoPlayer.setCurrentTime(0).catch(() => {});
+            vimeoPlayer.pause().catch(() => {});
+        });
+    };
+
+    const setupYouTube = () => {
+        embedContainerRef.current!.innerHTML = '';
+        const videoDiv = document.createElement('div');
+        videoDiv.id = `yt-player-${videoId}`;
+        videoDiv.style.width = '100%';
+        videoDiv.style.height = '100%';
+        embedContainerRef.current!.appendChild(videoDiv);
+
+        const onPlayerReady = (event: any) => {
+            setDuration(event.target.getDuration());
+            // AUTO START ATTEMPT
+            event.target.setVolume(100);
+            event.target.unMute();
+            event.target.playVideo();
+        };
+
+        const onStateChange = (event: any) => {
+            // YT.PlayerState: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (video cued)
+            if (event.data === 1) setIsPlaying(true);
+            if (event.data === 2) setIsPlaying(false);
+            if (event.data === 0) {
+                 setIsPlaying(false);
+                 setProgress(0);
+                 event.target.seekTo(0);
+                 event.target.pauseVideo();
+            }
+        };
+
+        const createPlayer = () => {
+             ytPlayer = new window.YT.Player(videoDiv, {
+                videoId: videoId,
+                width: '100%',
+                height: '100%',
+                playerVars: {
+                    playsinline: 1,
+                    controls: 0,
+                    disablekb: 1,
+                    fs: 0,
+                    rel: 0,
+                    modestbranding: 1,
+                    iv_load_policy: 3
+                },
+                events: {
+                    onReady: onPlayerReady,
+                    onStateChange: onStateChange
+                }
+            });
+            playerRef.current = ytPlayer;
+        };
+
+        if (window.YT && window.YT.Player) {
+            createPlayer();
+        } else {
+            // Poll for YT API
+            if (checkYTInterval.current) clearInterval(checkYTInterval.current);
+            checkYTInterval.current = setInterval(() => {
+                if (window.YT && window.YT.Player) {
+                    if (checkYTInterval.current) clearInterval(checkYTInterval.current);
+                    createPlayer();
+                }
+            }, 100);
+        }
+    };
+
+    if (provider === 'vimeo') setupVimeo();
+    else if (provider === 'youtube') setupYouTube();
+
+    // SAFETY: Poll for play state to keep UI in sync
+    syncInterval = setInterval(() => {
+        if (provider === 'vimeo' && vimeoPlayer) {
+            vimeoPlayer.getPaused().then((paused: boolean) => setIsPlaying(!paused)).catch(() => {});
+            vimeoPlayer.getCurrentTime().then((t: number) => setProgress(t)).catch(() => {});
+        } else if (provider === 'youtube' && playerRef.current && typeof playerRef.current.getCurrentTime === 'function') {
+            try {
+                const ct = playerRef.current.getCurrentTime();
+                if (typeof ct === 'number') setProgress(ct);
+                
+                const state = playerRef.current.getPlayerState();
+                // 1 is playing, 3 is buffering (treat as playing for UI toggle purposes)
+                setIsPlaying(state === 1 || state === 3);
+            } catch (e) { /* ignore */ }
+        }
+    }, 1000);
+    
+    return () => {
+        if (syncInterval) clearInterval(syncInterval);
+        if (checkYTInterval.current) clearInterval(checkYTInterval.current);
+        if (vimeoPlayer) vimeoPlayer.unload();
+        if (ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
+        playerRef.current = null;
+    };
+  }, [videoId, provider]);
+
+
+  // --- 4. Controls Logic ---
+  const showControlsTemporarily = useCallback(() => {
+    // Always allow showing controls if we are in "started" mode (which is always true now)
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-    
-    if (isPlaying) {
-      controlsTimeoutRef.current = setTimeout(() => {
+    controlsTimeoutRef.current = setTimeout(() => {
         setShowControls(false);
-      }, 3000);
-    }
-  };
-
-  const handleInteraction = () => {
-    showControlsTemporarily();
-    
-    // Aggressive unmute on any interaction
-    if (playerRef.current) {
-        // If muted, unmute
-        if (isMuted) {
-             playerRef.current.setMuted(false).then(() => {
-                setIsMuted(false);
-                setVolume(1);
-            }).catch(() => {});
-        }
-        // Always try to force volume to 100% on interaction
-        playerRef.current.setVolume(1).catch(() => {});
-    }
-  };
+    }, 3000);
+  }, []); // removed dependency hasStarted
 
   const togglePlay = () => {
-    if (!playerRef.current) return;
-    if (isPlaying) {
-      playerRef.current.pause();
-    } else {
-      // Ensure sound is on when we hit play
-      playerRef.current.setMuted(false).catch(() => {});
-      playerRef.current.setVolume(1).catch(() => {});
-      playerRef.current.play();
+    const player = playerRef.current;
+    if (!player) return;
+
+    if (provider === 'vimeo') {
+        player.getPaused().then((paused: boolean) => {
+            if (paused) {
+                player.setVolume(1).catch(() => {});
+                player.setMuted(false).catch(() => {});
+                player.play().catch((e: any) => console.error("Play failed", e));
+                setIsPlaying(true);
+            } else {
+                player.pause().catch((e: any) => console.error("Pause failed", e));
+                setIsPlaying(false);
+            }
+        });
+    } else if (provider === 'youtube') {
+        if (typeof player.getPlayerState !== 'function') return;
+        const state = player.getPlayerState();
+        if (state === 1 || state === 3) { // Playing or Buffering -> Pause
+            player.pauseVideo();
+            setIsPlaying(false);
+        } else {
+            player.unMute();
+            player.setVolume(100);
+            player.playVideo();
+            setIsPlaying(true);
+        }
     }
+    
     showControlsTemporarily();
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
     setProgress(time);
-    playerRef.current?.setCurrentTime(time);
-    showControlsTemporarily();
-  };
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVol = parseFloat(e.target.value);
-    setVolume(newVol);
-    setIsMuted(newVol === 0);
-    playerRef.current?.setVolume(newVol);
-    playerRef.current?.setMuted(newVol === 0);
-    showControlsTemporarily();
-  };
-
-  const toggleMute = () => {
-    if (isMuted) {
-        playerRef.current?.setMuted(false);
-        playerRef.current?.setVolume(1);
-        setIsMuted(false);
-        setVolume(1);
-    } else {
-        playerRef.current?.setMuted(true);
-        setIsMuted(true);
-        setVolume(0);
+    const player = playerRef.current;
+    
+    if (player) {
+        if (provider === 'vimeo') {
+            player.setCurrentTime(time).catch(() => {});
+        } else if (provider === 'youtube') {
+            if (typeof player.seekTo === 'function') player.seekTo(time, true);
+        }
     }
     showControlsTemporarily();
-  }
+  };
 
-  // Generate Src
-  const src = React.useMemo(() => {
-    const params: VimeoEmbedParams = {
-      ...VIMEO_PARAMS,
-      player_id: '0',
-      app_id: VIDEO_CONFIG.appId,
-      controls: '0',
-      background: '1', // Attempt to trigger background mode to help with filling
-      transparent: '0', // Force opaque
-    };
-    const queryString = new URLSearchParams(params).toString();
-    return `https://player.vimeo.com/video/${videoId}?${queryString}`;
-  }, [videoId]);
-
-  // Format time helper
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
+  // Logic: Controls are visible if explicitly shown (hover/tap) OR if video is NOT playing.
+  const isControlsVisible = showControls || !isPlaying;
+
   return (
     <div 
-        ref={containerRef}
-        className={`relative w-full h-full overflow-hidden bg-black group ${className}`}
-        onClick={handleInteraction}
-        onMouseMove={handleInteraction}
-        onTouchStart={handleInteraction}
-        style={{ backgroundColor: '#000000' }}
+        ref={wrapperRef}
+        className={`relative w-full h-full overflow-hidden bg-black select-none ${className}`}
+        style={{ 
+            backgroundImage: thumbnailUrl ? `url(${thumbnailUrl})` : 'none',
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat'
+        }}
+        onMouseMove={showControlsTemporarily}
+        onTouchStart={showControlsTemporarily}
     >
-      <iframe
-        ref={iframeRef}
-        src={src}
-        style={iframeStyle}
-        frameBorder="0"
-        allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share"
-        title={videoTitle}
-        className="pointer-events-none bg-black"
-      />
-
-      {/* Controls Overlay */}
+      {/* 1. Video Layer - Centered & Sized to Cover */}
       <div 
-        className={`absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40 transition-opacity duration-300 flex flex-col justify-between p-6 pointer-events-none ${showControls ? 'opacity-100' : 'opacity-0'}`}
+        ref={embedContainerRef}
+        className="absolute"
+        style={{
+            width: `${videoDimensions.width}px`,
+            height: `${videoDimensions.height}px`,
+            top: '50%',
+            left: '50%',
+            transform: 'translate3d(-50%, -50%, 0)', // Use translate3d for hardware acceleration
+            opacity: 1, 
+            zIndex: 10,
+            pointerEvents: 'none' // CRITICAL: Ensure iframe never steals touch events
+        }}
+      />
+      {/* Force inner iframe to block level and full size via style injection if needed */}
+      <style>{`
+        iframe { 
+            width: 100% !important; 
+            height: 100% !important; 
+            display: block !important;
+            pointer-events: none !important; /* Double safety */
+        }
+      `}</style>
+
+      {/* 2. Controls Layer */}
+      {/* Click area for toggling play/pause - Covers entire screen below UI controls */}
+      <div 
+          className="absolute inset-0 z-30 cursor-pointer bg-transparent" 
+          onClick={togglePlay}
+      ></div>
+      
+      <div 
+          className={`absolute inset-0 z-40 flex flex-col justify-between p-6 pointer-events-none transition-opacity duration-500 ${isControlsVisible ? 'opacity-100' : 'opacity-0'}`}
+          style={{ background: isControlsVisible ? 'linear-gradient(to top, rgba(0,0,0,0.7), transparent 40%, transparent 60%, rgba(0,0,0,0.5))' : 'none' }}
       >
-        {/* Top Bar */}
-        <div className="flex justify-between items-start pointer-events-auto">
-            <h2 className="text-white font-medium text-sm drop-shadow-md opacity-80">{videoTitle}</h2>
-            {isMuted && (
-                <button 
-                    onClick={(e) => { e.stopPropagation(); toggleMute(); }}
-                    className="bg-white/20 hover:bg-white/30 backdrop-blur-sm text-white px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75L21 12m0 0l-3.75 2.25M21 12H3" />
-                    </svg>
-                    Tap to Unmute
-                </button>
-            )}
-        </div>
-
-        {/* Center Play Button */}
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-auto">
-             {!isPlaying && (
-                 <button 
-                    onClick={(e) => { e.stopPropagation(); togglePlay(); }}
-                    className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center hover:scale-110 transition-transform text-white border border-white/20"
-                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="white" viewBox="0 0 24 24" className="w-8 h-8 ml-1">
-                      <path d="M8 5v14l11-7z" />
-                    </svg>
-                 </button>
-             )}
-        </div>
-
-        {/* Bottom Bar: Play Controls */}
-        <div className="flex flex-col gap-2 w-full max-w-2xl mx-auto pointer-events-auto">
-            
-            {/* Seek Bar */}
-            <div className="flex items-center gap-3">
-                <span className="text-white/80 text-xs font-mono w-10 text-right">{formatTime(progress)}</span>
-                <input
-                    type="range"
-                    min="0"
-                    max={duration || 100}
-                    value={progress}
-                    onChange={handleSeek}
-                    className="flex-grow h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
-                />
-                <span className="text-white/80 text-xs font-mono w-10">{formatTime(duration)}</span>
-            </div>
-
-            {/* Bottom Row: Play/Pause and Volume */}
-            <div className="flex items-center justify-between mt-2">
-                <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="text-white hover:text-gray-300 p-2">
-                    {isPlaying ? (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5" />
-                        </svg>
-                    ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
-                        </svg>
-                    )}
-                </button>
-
-                <div className="flex items-center gap-2 w-32">
-                    <button onClick={(e) => { e.stopPropagation(); toggleMute(); }} className="text-white">
-                         {isMuted || volume === 0 ? (
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75 21 12m0 0-3.75 2.25M21 12H3" />
-                            </svg>
-                         ) : (
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
-                            </svg>
-                         )}
-                    </button>
-                    <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.05"
-                        value={isMuted ? 0 : volume}
-                        onChange={handleVolumeChange}
-                        className="flex-grow h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
-                    />
-                </div>
-            </div>
-        </div>
+          <div className="flex justify-between items-start">
+              <h2 className="text-white font-medium text-sm drop-shadow-md opacity-80 tracking-wide">{videoTitle}</h2>
+          </div>
+          
+          {/* Big center play button - purely visual, click passes through to layer 30 */}
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+              {!isPlaying && (
+                  <div className="text-white drop-shadow-xl opacity-80 scale-125">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" className="w-16 h-16 ml-1">
+                          <path d="M8 5v14l11-7z" />
+                      </svg>
+                  </div>
+              )}
+          </div>
+          
+          <div className="flex flex-col gap-4 w-full max-w-3xl mx-auto pointer-events-auto pb-6">
+              <div className="flex items-center gap-4 group/seek">
+                  <span className="text-white/80 text-xs font-mono w-10 text-right">{formatTime(progress)}</span>
+                  <input
+                      type="range"
+                      min="0"
+                      max={duration || 100}
+                      value={progress}
+                      onChange={handleSeek}
+                      className="flex-grow h-1 bg-white/30 rounded-full appearance-none cursor-pointer hover:h-1.5 transition-all [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow-lg"
+                  />
+                  <span className="text-white/80 text-xs font-mono w-10">{formatTime(duration)}</span>
+              </div>
+          </div>
       </div>
     </div>
   );
 };
 
-export default VimeoPlayer;
+export default UniversalPlayer;

@@ -4,70 +4,72 @@ import { VIDEO_CONFIG } from './constants';
 
 const App: React.FC = () => {
   const [mounted, setMounted] = useState(false);
-  
-  // Initialize videoId state.
-  // - If URL query is numeric, use it immediately (fastest).
-  // - If URL query is a link, set to null initially to trigger async resolution.
-  // - If empty or invalid, use default.
-  const [videoId, setVideoId] = useState<string | null>(() => {
+  const [videoData, setVideoData] = useState<{ id: string; provider: 'vimeo' | 'youtube' } | null>(() => {
     if (typeof window !== 'undefined') {
       const searchParams = window.location.search;
       if (searchParams && searchParams.length > 1) {
-        const query = searchParams.substring(1); // Remove '?'
+        const query = searchParams.substring(1); 
         const decoded = decodeURIComponent(query).trim();
         
-        // If it's a simple ID (digits only), return it immediately for instant playback
+        // 1. Check for simple numeric ID (Assume Vimeo)
         if (/^\d+$/.test(decoded)) {
-          return decoded;
+          return { id: decoded, provider: 'vimeo' };
+        }
+
+        // 2. Check for YouTube URL
+        const ytRegex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+        const ytMatch = decoded.match(ytRegex);
+        if (ytMatch && ytMatch[1]) {
+            return { id: ytMatch[1], provider: 'youtube' };
         }
         
-        // If it looks like a Vimeo URL, return null to signal we need to resolve it
+        // 3. Check for Vimeo URL (needs resolution)
         if (decoded.includes('vimeo.com')) {
-          return null; 
+          return null; // Trigger async resolution
         }
       }
     }
-    return VIDEO_CONFIG.id;
+    // Default fallback
+    return { id: VIDEO_CONFIG.id, provider: 'vimeo' };
   });
 
   useEffect(() => {
     setMounted(true);
 
-    // If videoId is null, it means we have a URL query that needs resolving
-    if (videoId === null) {
+    if (videoData === null) {
       const resolveVimeoUrl = async () => {
         try {
           const searchParams = window.location.search;
           const query = searchParams.substring(1);
           const decodedUrl = decodeURIComponent(query).trim();
           
-          // Vimeo oEmbed endpoint helps us get the ID from a URL (e.g. vanity URLs, showcases)
           const response = await fetch(`https://vimeo.com/api/oembed.json?url=${encodeURIComponent(decodedUrl)}`);
           
           if (response.ok) {
             const data = await response.json();
             if (data.video_id) {
-              setVideoId(String(data.video_id));
+              setVideoData({ id: String(data.video_id), provider: 'vimeo' });
               return;
             }
           }
         } catch (e) {
           console.error("Could not resolve Vimeo URL", e);
         }
-        // Fallback to default if resolution fails
-        setVideoId(VIDEO_CONFIG.id);
+        setVideoData({ id: VIDEO_CONFIG.id, provider: 'vimeo' });
       };
 
       resolveVimeoUrl();
     }
-  }, [videoId]);
+  }, [videoData]);
 
   if (!mounted) return null;
 
   return (
-    <main className="fixed inset-0 w-full h-full bg-black flex items-center justify-center overflow-hidden z-0">
-      {/* Only render player once we have a valid ID. If loading (null), screen stays black. */}
-      {videoId ? <VimeoPlayer videoId={videoId} /> : null}
+    // Use h-[100dvh] to account for mobile browser bars dynamically
+    <main className="fixed inset-0 w-full h-[100dvh] bg-black flex items-center justify-center overflow-hidden z-0">
+      {videoData ? (
+        <VimeoPlayer videoId={videoData.id} provider={videoData.provider} />
+      ) : null}
     </main>
   );
 };
